@@ -1,8 +1,11 @@
-import streamlit as st
+import gradio as gr
 from ultralytics import YOLO
 from PIL import Image
 import numpy as np
 import cv2
+import os
+
+os.environ["YOLO_CONFIG_DIR"] = "/tmp/Ultralytics"
 
 DIAGNOSTICS = {
     'missing_hole': {
@@ -39,78 +42,50 @@ DIAGNOSTICS = {
 
 CLASS_NAMES = ['missing_hole', 'mouse_bite', 'open_circuit', 'short', 'spur', 'spurious_copper']
 
-SEVERITY_COLOR = {
-    'Critical': '🔴',
-    'High': '🟠',
-    'Medium': '🟡',
-    'Low': '🟢'
-}
+model = YOLO("runs/detect/pcb_detector/weights/best.pt")
 
-MODEL_PATH = "runs/detect/pcb_detector/weights/best.pt"
-
-st.set_page_config(page_title="PCB Fault Detector", page_icon="🔍", layout="wide")
-st.title("🔍 PCB Fault Detection System")
-st.markdown("Upload a PCB image to detect defects and get diagnostic information.")
-
-@st.cache_resource
-def load_model():
-    return YOLO(MODEL_PATH)
-
-model = load_model()
-
-uploaded = st.file_uploader("Upload PCB Image", type=['jpg', 'jpeg', 'png'])
-
-if uploaded:
-    image = Image.open(uploaded).convert('RGB')
+def detect(image):
     img_array = np.array(image)
+    results = model(img_array, conf=0.25)
+    result = results[0]
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Original Image")
-        st.image(image, use_container_width=True)
-
-    with st.spinner("Analyzing PCB..."):
-        results = model(img_array, conf=0.25)
-        result = results[0]
-        annotated = result.plot()
-        annotated = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-
-    with col2:
-        st.subheader("Detected Faults")
-        st.image(annotated, use_container_width=True)
+    annotated = result.plot()
+    annotated = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+    annotated_pil = Image.fromarray(annotated)
 
     boxes = result.boxes
     if boxes is None or len(boxes) == 0:
-        st.success("✅ No faults detected — PCB looks healthy!")
-    else:
-        detected = {}
-        for box in boxes:
-            cls_id = int(box.cls[0])
-            cls_name = CLASS_NAMES[cls_id]
-            conf = float(box.conf[0])
-            if cls_name not in detected or detected[cls_name]['confidence'] < conf:
-                detected[cls_name] = {'confidence': conf}
+        return annotated_pil, "✅ No faults detected — PCB looks healthy!"
 
-        st.subheader(f"Found {len(detected)} fault type(s)")
+    detected = {}
+    for box in boxes:
+        cls_id = int(box.cls[0])
+        cls_name = CLASS_NAMES[cls_id]
+        conf = float(box.conf[0])
+        if cls_name not in detected or detected[cls_name] < conf:
+            detected[cls_name] = conf
 
-        for fault, info in detected.items():
-            diag = DIAGNOSTICS.get(fault, {})
-            sev = diag.get('severity', 'Unknown')
-            icon = SEVERITY_COLOR.get(sev, '⚪')
+    output = f"### Found {len(detected)} fault type(s)\n\n"
+    for fault, conf in detected.items():
+        diag = DIAGNOSTICS.get(fault, {})
+        sev = diag.get('severity', 'Unknown')
+        output += f"---\n"
+        output += f"## {'🔴' if sev=='Critical' else '🟠' if sev=='High' else '🟡'} {fault.replace('_',' ').title()} — {sev} (conf: {conf:.0%})\n\n"
+        output += f"**Consequence:**\n{diag.get('consequence','')}\n\n"
+        output += f"**Solution:**\n{diag.get('solution','')}\n\n"
 
-            with st.expander(f"{icon} {fault.replace('_', ' ').title()} — {sev} severity (conf: {info['confidence']:.0%})", expanded=True):
-                st.markdown("**Consequence**")
-                st.warning(diag.get('consequence', 'N/A'))
-                st.markdown("**Solution**")
-                st.success(diag.get('solution', 'N/A'))
+    return annotated_pil, output
 
-        st.subheader("Summary")
-        summary_data = []
-        for fault, info in detected.items():
-            diag = DIAGNOSTICS.get(fault, {})
-            summary_data.append({
-                'Fault': fault.replace('_', ' ').title(),
-                'Severity': diag.get('severity', 'Unknown'),
-                'Confidence': f"{info['confidence']:.0%}"
-            })
-        st.table(summary_data)
+demo = gr.Interface(
+    fn=detect,
+    inputs=gr.Image(type="pil", label="Upload PCB Image"),
+    outputs=[
+        gr.Image(type="pil", label="Detected Faults"),
+        gr.Markdown(label="Diagnosis")
+    ],
+    title="PCB Fault Detection System",
+    description="Upload a PCB image to detect defects and get circuit-level diagnostic information. Detects: Missing Hole, Mouse Bite, Open Circuit, Short Circuit, Spur, Spurious Copper.",
+    examples=[]
+)
+
+demo.launch()
