@@ -1,0 +1,6 @@
+data/ 
+runs/ 
+venv/ 
+*.zip 
+__pycache__/ 
+*.pt 
